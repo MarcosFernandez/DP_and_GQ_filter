@@ -1,0 +1,99 @@
+#!/usr/bin/env perl
+#DP_and_GQ_filter
+use strict;
+use warnings;
+use Getopt::Long;
+use List::Util qw(any);
+use lib '/opt/DP_and_GQ_filter/DAT';
+use Vcf;
+
+our $VERSION='1.0.0 Singularity Container version';
+
+my $usage = qq/
+
+# $0 rdcon v.$VERSION\n
+Usage:   $0 [<arguments>]\n
+Command:        -i	OPT <FILE>	Input vcf, either filename or piped content (<vcf_file>|<vcf_file.gz>|-|not defined)
+					[STDIN]
+		-o	OPT <FILE>	Output vcf, either filename or piped content (<vcf_file>|<vcf_file.gz>|-|not defined)
+					[STDOUT]
+		-d|dp	OPT	<INT>	Min sample DP [0]
+		-g|gq	OPT	<INT>	Min sample GQ [0]
+
+		-h	   		Show this screen and die. 
+
+Description: This script takes as input a vcf file and outputs a vcf file with variants where all
+samples have DP and GQ values above thresholds set by the user.
+
+\n/ ;
+
+my %opts = (INPUT=>undef, OUTPUT=>undef, ,DP=>0, GQ=>0, HELP=>undef);
+my $result = GetOptions ("-i:s"  => \$opts{INPUT},
+						 "-o:s"	=> \$opts{OUTPUT},
+						 "-d|dp:i"	=> \$opts{DP},
+						 "-g|gq:i"	=> \$opts{GQ},
+						 "-h"	=> \$opts{HELP}
+			);
+
+### Defaults ###
+if (defined $opts{HELP}){die $usage};
+
+## Handling the input and output ##
+my $input_fh;
+if ((!defined $opts{INPUT})||($opts{INPUT} eq "-")||($opts{INPUT} eq "STDIN")) {
+	$input_fh=*STDIN;
+	$opts{INPUT}='-';
+}
+else {
+	if ($opts{INPUT} =~ m/\.gz$/){
+		open ($input_fh, "gunzip -c $opts{INPUT}|") or die "ERROR: Couldn't open $opts{INPUT}\n\n";
+	} else {
+		open ($input_fh, "<", $opts{INPUT}) or die "ERROR: Couldn't open $opts{INPUT}\n\n";
+	}
+}
+
+my $output_fh;
+if ((!defined $opts{OUTPUT})||($opts{OUTPUT} eq "-")||($opts{OUTPUT} eq "STDOUT")) {
+	$output_fh=*STDOUT;
+	$opts{OUTPUT}='-';
+}
+else {
+	if ($opts{OUTPUT} =~ m/\.gz$/){
+		open ($output_fh, "| gzip -c > $opts{OUTPUT}") or die "ERROR: Couldn't save in $opts{OUTPUT}\n\n";
+	} else {
+		open ($output_fh, ">$opts{OUTPUT}") or die "ERROR: Couldn't save in $opts{OUTPUT}\n\n";
+	}
+}
+
+my $vcfi=Vcf->new(fh=>$input_fh, silent=>1);
+$vcfi->parse_header();
+
+$vcfi->add_header_line({key=>'Hardfiltered',value=>"\"Variants where at least one sample did not have a DP of $opts{DP} and a GQ of $opts{GQ}\""});
+
+my %index;
+for my $i(0..$#{$vcfi->{columns}}) {
+    my $col=$vcfi->{columns}[$i];
+    $col=~s/\#//;
+    $index{$col}=$i;
+};
+
+print {$output_fh} $vcfi->format_header();
+
+### Doing stuff ###
+VARIANT:
+while (my $line=$vcfi->next_line()) {
+		chomp $line;
+		my @line=split(/\t/,$line);
+
+        my $DP_format_index=$vcfi->get_tag_index($line[$index{FORMAT}],'DP',':');
+        my $GQ_format_index=$vcfi->get_tag_index($line[$index{FORMAT}],'GQ',':');
+		
+		my @all_samples_DP=@{$vcfi->get_sample_field(\@line,$DP_format_index)};
+		if (any {$_ eq '.'} @all_samples_DP) {next VARIANT};
+		my @all_samples_GQ=@{$vcfi->get_sample_field(\@line,$GQ_format_index)};
+		if (any {$_ eq '.'} @all_samples_GQ) {next VARIANT};
+		if ((!(any {$_ < $opts{DP}} @all_samples_DP)) && (!(any {$_ < $opts{GQ}} @all_samples_GQ))) {
+			print {$output_fh} join("\t",@line),"\n"
+#			,join(',',@all_samples_DP),"\n|",join(',',@all_samples_GQ),"|\n";
+		}
+};
